@@ -67,12 +67,7 @@ auto iterator_level_from_unit(TextUnit unit) {
   }
 }
 
-struct OCRResult {
-  OCRResult() {}
-  OCRResult(const std::string& error_) : error(error_) {}
-
-  std::string error;
-};
+typedef std::string OCRResult;
 
 using namespace emscripten;
 
@@ -97,31 +92,6 @@ class ProgressMonitor : public tesseract::ETEXT_DESC {
   emscripten::val js_callback_;
 };
 
-/**
- * Wrapper around a Leptonica image.
- */
-class Image {
- public:
-  Image(int width, int height) { pix_ = pixCreate(width, height, 32); }
-
-  ~Image() { pixDestroy(&pix_); }
-
-  int Width() const { return pixGetWidth(pix_); }
-
-  int Height() const { return pixGetHeight(pix_); }
-
-  emscripten::val Data() const {
-    auto len = Width() * Height();
-    return emscripten::val(
-        emscripten::typed_memory_view(len, pixGetData(pix_)));
-  }
-
-  PIX* Pix() const { return pix_; }
-
- private:
-  PIX* pix_;
-};
-
 class OCREngine {
  public:
   OCREngine() : tesseract_(new tesseract::TessBaseAPI()) {}
@@ -130,20 +100,17 @@ class OCREngine {
 
   std::string Version() const { return tesseract_->Version(); }
 
-  OCRResult LoadModel(const std::string& model_data) {
-    std::vector<std::string> vars_vec;
-    std::vector<std::string> vars_values;
-
+  OCRResult LoadModel(size_t dumb_model_ptr, size_t model_size, const std::string& lang) {
+    auto model_data = (char *)dumb_model_ptr;
     auto result = tesseract_->Init(
-        model_data.data(), model_data.size(), "eng", tesseract::OEM_DEFAULT,
-        nullptr /* configs */, 0 /* configs_size */, nullptr /* vars_vec */,
-        nullptr /* vars_values */, false /* set_only_non_debug_params */,
-        nullptr /* reader */
+        model_data, model_size, lang.c_str(), tesseract::OEM_LSTM_ONLY,
+        nullptr /* configs */, 0 /* configs_size */,nullptr /* vars_vec */,
+        nullptr /* vars_values */, false /* set_only_non_debug_params */, nullptr /* reader */
     );
     if (result != 0) {
       return OCRResult("Failed to load training data");
     }
-
+    delete[] model_data;
     return {};
   }
 
@@ -169,7 +136,10 @@ class OCREngine {
     return {};
   }
 
-  OCRResult LoadImage(const Image& image) {
+  OCRResult LoadImage(size_t ptr) {
+    // Directly accepting a Pix* makes wazero-emscripten-embind to generate a class type that
+    // doesn't expose it's raw pointer. So we typecast this instead.
+    auto image = (Pix *)ptr;
     // Initialize for layout analysis only if a model has not been loaded.
     // This is a no-op if a model has been loaded.
     tesseract_->InitForAnalysePage();
@@ -179,11 +149,13 @@ class OCREngine {
     // page as one block of text.
     tesseract_->SetPageSegMode(tesseract::PSM_AUTO);
 
-    tesseract_->SetImage(image.Pix());
-    tesseract_->SetRectangle(0, 0, image.Width(), image.Height());
+    tesseract_->SetImage(image);
+    tesseract_->SetRectangle(0, 0, pixGetWidth(image), pixGetHeight(image));
 
     layout_analysis_done_ = false;
     ocr_done_ = false;
+    // Tesseract copies the Pix internally, so we should clean up immediately.
+    pixDestroy(&image);
 
     return {};
   }
@@ -361,8 +333,6 @@ EMSCRIPTEN_BINDINGS(ocrlib) {
       .field("success", &GetVariableResult::success)
       .field("value", &GetVariableResult::value);
 
-  class_<Image>("Image").constructor<int, int>().function("data", &Image::Data);
-
   class_<OCREngine>("OCREngine")
       .constructor<>()
       .function("clearImage", &OCREngine::ClearImage)
@@ -372,11 +342,9 @@ EMSCRIPTEN_BINDINGS(ocrlib) {
       .function("getText", &OCREngine::GetText)
       .function("getTextBoxes", &OCREngine::GetTextBoxes)
       .function("getVariable", &OCREngine::GetVariable)
-      .function("loadImage", &OCREngine::LoadImage)
+      .function("loadImage", &OCREngine::LoadImage, allow_raw_pointers())
       .function("loadModel", &OCREngine::LoadModel)
       .function("setVariable", &OCREngine::SetVariable);
-
-  value_object<OCRResult>("OCRResult").field("error", &OCRResult::error);
 
   enum_<TextUnit>("TextUnit")
       .value("Line", TextUnit::Line)
