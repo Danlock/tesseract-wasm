@@ -92,6 +92,30 @@ class ProgressMonitor : public tesseract::ETEXT_DESC {
   emscripten::val js_callback_;
 };
 
+/**
+ * ByteView mallocs some bytes and exposes the memory via emscripten::typed_memory_view.
+ */
+class ByteView {
+ public:
+  ByteView(size_t size) {
+    size_ = size;
+    bytes_ = (const unsigned char *) malloc(size);
+  }
+
+  ~ByteView() { free((void *) bytes_); }
+
+  emscripten::val Data() const {
+    return emscripten::val(emscripten::typed_memory_view(size_, bytes_));
+  }
+
+  size_t Size() const { return size_; }
+  const unsigned char * Bytes() const { return bytes_; }
+
+ private:
+  size_t size_;
+  const unsigned char *bytes_;
+};
+
 class OCREngine {
  public:
   OCREngine() : tesseract_(new tesseract::TessBaseAPI()) {}
@@ -100,17 +124,15 @@ class OCREngine {
 
   std::string Version() const { return tesseract_->Version(); }
 
-  OCRResult LoadModel(size_t dumb_model_ptr, size_t model_size, const std::string& lang) {
-    auto model_data = (char *)dumb_model_ptr;
+  OCRResult LoadModel(const ByteView& model, const std::string& lang) {
     auto result = tesseract_->Init(
-        model_data, model_size, lang.c_str(), tesseract::OEM_LSTM_ONLY,
-        nullptr /* configs */, 0 /* configs_size */,nullptr /* vars_vec */,
+        (const char *) model.Bytes(), model.Size(), lang.c_str(), tesseract::OEM_LSTM_ONLY,
+        nullptr /* configs */, 0 /* configs_size */, nullptr /* vars_vec */,
         nullptr /* vars_values */, false /* set_only_non_debug_params */, nullptr /* reader */
     );
     if (result != 0) {
       return OCRResult("Failed to load training data");
     }
-    delete[] model_data;
     return {};
   }
 
@@ -136,27 +158,26 @@ class OCREngine {
     return {};
   }
 
-  OCRResult LoadImage(size_t ptr) {
-    // Directly accepting a Pix* makes wazero-emscripten-embind to generate a class type that
-    // doesn't expose it's raw pointer. So we typecast this instead.
-    auto image = (Pix *)ptr;
+  OCRResult LoadImage(const ByteView& view) {
+    // Unavoidable copy of our ByteView into a Leptonica Pix.
+    // Using pixGetData() instead like robert-knight/tesseract-wasm originally did is another option,
+    // but then Go would need to re encode images to Leptonica's Pix format in memory anyway.
+    auto pix = pixReadMem(view.Bytes(), view.Size());
+    if (pix == nullptr) {
+      return OCRResult("pixReadMem failed");
+    }
+
     // Initialize for layout analysis only if a model has not been loaded.
     // This is a no-op if a model has been loaded.
     tesseract_->InitForAnalysePage();
-
-    // Enable page segmentation and layout analysis. Must be called after `Init`
-    // to take effect. Without this Tesseract defaults to treating the whole
-    // page as one block of text.
-    tesseract_->SetPageSegMode(tesseract::PSM_AUTO);
-
-    tesseract_->SetImage(image);
-    tesseract_->SetRectangle(0, 0, pixGetWidth(image), pixGetHeight(image));
+    // Tesseract SetImage also copies the Pix for internal use, unfortunately.
+    // Doesn't seem like I can get rid of that without adding Tesseract patches. Possibly worth it...
+    tesseract_->SetImage(pix);
 
     layout_analysis_done_ = false;
     ocr_done_ = false;
     // Tesseract copies the Pix internally, so we should clean up immediately.
-    pixDestroy(&image);
-
+    pixDestroy(&pix);
     return {};
   }
 
@@ -333,6 +354,10 @@ EMSCRIPTEN_BINDINGS(ocrlib) {
       .field("success", &GetVariableResult::success)
       .field("value", &GetVariableResult::value);
 
+  class_<ByteView>("ByteView")
+      .constructor<size_t>()
+      .function("data", &ByteView::Data);
+
   class_<OCREngine>("OCREngine")
       .constructor<>()
       .function("clearImage", &OCREngine::ClearImage)
@@ -342,7 +367,7 @@ EMSCRIPTEN_BINDINGS(ocrlib) {
       .function("getText", &OCREngine::GetText)
       .function("getTextBoxes", &OCREngine::GetTextBoxes)
       .function("getVariable", &OCREngine::GetVariable)
-      .function("loadImage", &OCREngine::LoadImage, allow_raw_pointers())
+      .function("loadImage", &OCREngine::LoadImage)
       .function("loadModel", &OCREngine::LoadModel)
       .function("setVariable", &OCREngine::SetVariable);
 
