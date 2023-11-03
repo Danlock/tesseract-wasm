@@ -6,7 +6,11 @@ EMSDK_DIR=$(ROOT)/third_party/emsdk/upstream/emscripten
 INSTALL_DIR=$(ROOT)/install
 
 DIST_TARGETS=\
-  dist/tesseract-core.wasm
+  dist/tesseract-core.wasm \
+  dist/tesseract-core-debug.wasm
+
+# DIST_TARGETS=\
+#   dist/tesseract-core-debug.wasm
 
 .PHONY: lib
 lib: $(DIST_TARGETS)
@@ -135,32 +139,39 @@ build/tesseract.uptodate: build/leptonica.uptodate third_party/tesseract
 	(cd build/tesseract && $(EMSDK_DIR)/emmake ninja install)
 	touch build/tesseract.uptodate
 
-# emcc flags. `-Os` minifies the JS wrapper and optimises WASM code size.
+# emcc flags.
 # We also disable filesystem support to reduce the JS wrapper size.
 # Enabling memory growth is important since loading document images may
 # require large blocks of memory.
 EMCC_FLAGS =\
-  -O0\
-  -g3\
   -sSTANDALONE_WASM\
   -sPURE_WASI\
-  -sEXPORTED_FUNCTIONS="_malloc,_free,_pixReadMem"\
-  --minify 0\
+  -sEXPORTED_FUNCTIONS="_malloc,_free"\
   $(EMCC_PORTS)\
   --no-entry\
   -sFILESYSTEM=0 \
   -sALLOW_MEMORY_GROWTH\
-  -sMAXIMUM_MEMORY=1GB \
   -std=c++20 \
   -fexperimental-library
 
 # Build main WASM binary for browsers that support WASM SIMD.
 build/tesseract-core.js build/tesseract-core.wasm: src/lib.cpp src/tesseract-init.js build/tesseract.uptodate
-	$(EMSDK_DIR)/emcc src/lib.cpp $(EMCC_FLAGS) \
+	$(EMSDK_DIR)/emcc src/lib.cpp $(EMCC_FLAGS) -O3 \
 		-I$(INSTALL_DIR)/include/ -L$(INSTALL_DIR)/lib/ -ltesseract -lleptonica -lembind \
 		-o build/tesseract-core.js
 	cp src/tesseract-core.d.ts build/
 
 dist/tesseract-core.wasm: build/tesseract-core.wasm
+	mkdir -p dist/
+	cp $< $@
+
+# Build debug WASM binary for browsers that support WASM SIMD.
+build/tesseract-core-debug.js build/tesseract-core-debug.wasm: src/lib.cpp src/tesseract-init.js build/tesseract.uptodate
+	$(EMSDK_DIR)/emcc src/lib.cpp $(EMCC_FLAGS) -O0 -g3 --minify 0 -fsanitize=undefined \
+		-I$(INSTALL_DIR)/include/ -L$(INSTALL_DIR)/lib/ -ltesseract -lleptonica -lembind \
+		-o build/tesseract-core-debug.js
+	cp src/tesseract-core.d.ts build/
+
+dist/tesseract-core-debug.wasm: build/tesseract-core-debug.wasm
 	mkdir -p dist/
 	cp $< $@

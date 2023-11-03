@@ -158,13 +158,55 @@ class OCREngine {
     return {};
   }
 
-  OCRResult LoadImage(const ByteView& view) {
+  // RemoveUnderlines removes underlines from the given image. Copies a lot.
+  PIX *RemoveUnderlines(PIX  *pix) {
+    // easy peasy very understandable underline removal with everybody's favorite Leptonica
+    // Copies the image at least 7 times but if the image isn't parsable without underline removal, what else can you do.
+    // Probably can be made more efficient but not by me.
+    // https://github.com/DanBloomberg/leptonica/blob/b667978e86c4bf74f7fdd75f833127d2de327550/prog/underlinetest.c
+    auto pixg = pixConvertTo8(pix, 0);
+    auto pixg2 = pixBackgroundNorm(pixg, NULL, NULL, 15, 15, 70, 105, 200, 5, 5);
+    PIX *pixb;
+    pixSauvolaBinarizeTiled(pixg2, 8, 0.34, 1, 1, NULL, &pixb);
+    pixDestroy(&pix);
+    pixDestroy(&pixg);
+    pixDestroy(&pixg2);
+
+    /* Get a seed image; try to have at least one pixel
+      * in each underline c.c  */
+    auto pixsd = pixMorphSequence(pixb, "c3.1 + o60.1", 0);
+
+    /* Get a mask image for the underlines.
+      * The o30.1 tries to remove accidental connections to text. */
+    auto pixm = pixMorphSequence(pixb, "c7.1 + o30.1", 0);
+
+    /* Fill into the seed, clipping to the mask  */
+    pixSeedfillBinary(pixsd, pixsd, pixm, 8);
+    pixDestroy(&pixm);
+
+    /* Small vertical dilation for better removal  */
+    auto pixsdd = pixMorphSequence(pixsd, "d1.3", 0);
+    pixDestroy(&pixsd);
+
+    /* Subtract to get text without underlines  */
+    auto pixt = pixSubtract(NULL, pixb, pixsdd);
+    pixDestroy(&pixsdd);
+    pixDestroy(&pixb);
+
+    return pixt;
+  }
+
+  OCRResult LoadImage(const ByteView& view, bool remove_underlines) {
     // Unavoidable copy of our ByteView into a Leptonica Pix.
     // Using pixGetData() instead like robert-knight/tesseract-wasm originally did is another option,
     // but then Go would need to re encode images to Leptonica's Pix format in memory anyway.
     auto pix = pixReadMem(view.Bytes(), view.Size());
     if (pix == nullptr) {
       return OCRResult("pixReadMem failed");
+    }
+
+    if (remove_underlines) {
+      pix = RemoveUnderlines(pix);
     }
 
     // Initialize for layout analysis only if a model has not been loaded.
