@@ -110,6 +110,8 @@ class ByteView {
 
   size_t Size() const { return size_; }
   const unsigned char * Bytes() const { return bytes_; }
+  // OOM is true if malloc failed, presumably due to Out Of Memory
+  bool OOM() const { return bytes_ == nullptr; }
 
  private:
   size_t size_;
@@ -398,7 +400,8 @@ EMSCRIPTEN_BINDINGS(ocrlib) {
 
   class_<ByteView>("ByteView")
       .constructor<size_t>()
-      .function("data", &ByteView::Data);
+      .function("data", &ByteView::Data)
+      .function("OOM", &ByteView::OOM);
 
   class_<OCREngine>("OCREngine")
       .constructor<>()
